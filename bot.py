@@ -26,10 +26,11 @@ from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
 
 # ============ CONFIG ============
-BOT_TOKEN = "8937388762:AAGvwqmcslPuKXyg9wQ8Mx2B17bY8DW-9Lw"
-ADMIN_ID = 964442694
-API_ID = 37181180
-API_HASH = "1b2984b61d0f4cba0e40350824c81a9f"
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+ADMIN_ID = int(os.environ["ADMIN_ID"])
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+DATA_DIR = os.environ.get("DATA_DIR", "./data")
 
 # Railway volume mount path (если нет — используем ./data)
 DATA_DIR = os.environ.get("DATA_DIR", "./data")
