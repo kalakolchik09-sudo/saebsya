@@ -259,12 +259,13 @@ def login_kb():
 async def start(m: Message):
     await init_db()
     u = await get_user(m.from_user.id)
+    print(f"[start] user={m.from_user.id} username={m.from_user.username} active={is_active(u)}")
     if m.from_user.id == ADMIN_ID:
         await m.answer("👑 Админ-панель:", reply_markup=admin_menu())
         await m.answer("Меню:", reply_markup=main_menu())
         return
     if not is_active(u):
-        await m.answer("🔒 Доступ не активирован.\nВведите ключ активации:")
+        await m.answer("🔒 Доступ не активирован.\nОтправь ключ активации (просто сообщением):")
         return
     await m.answer("✅ Добро пожаловать!", reply_markup=main_menu())
 
@@ -302,31 +303,39 @@ async def adm_list(c: CallbackQuery):
     await c.message.answer(text)
     await c.answer()
 
-# ---------- ACTIVATION ----------
+# ---------- KEY BUTTON + STATE ----------
 @router.message(F.text == "🔑 Активировать ключ")
 async def ask_key(m: Message, state: FSMContext):
-    await m.answer("Отправь ключ:")
+    if m.from_user.id == ADMIN_ID:
+        await m.answer("Ты админ, ключ не нужен."); return
+    u = await get_user(m.from_user.id)
+    if is_active(u):
+        await m.answer("У тебя уже активен доступ."); return
+    await m.answer("Отправь ключ активации:")
     await state.set_state(KeyState.waiting)
 
 @router.message(KeyState.waiting)
 async def do_activate(m: Message, state: FSMContext):
     key = (m.text or "").strip()
+    print(f"[activate] user={m.from_user.id} key='{key}' len={len(key)}")
     row = await get_key(key)
-    if not row or row[2] is not None:
-        await m.answer("❌ Ключ недействителен.")
-        await state.clear(); return
+    print(f"[activate] row={row}")
+
+    if not row:
+        await m.answer("❌ Такого ключа нет. Проверь и отправь ещё раз "
+                       "(или нажми /start).")
+        await state.clear()
+        return
+    if row[2] is not None:
+        await m.answer(f"❌ Ключ уже использован (user_id={row[2]}).")
+        await state.clear()
+        return
+
     await activate_key(m.from_user.id, key, row[1])
     await state.clear()
-    await m.answer("✅ Ключ активирован!", reply_markup=main_menu())
-
-async def ensure_active(m: Message) -> bool:
-    if m.from_user.id == ADMIN_ID:
-        return True
-    u = await get_user(m.from_user.id)
-    if not is_active(u):
-        await m.answer("🔒 Нет активного доступа. Активируй ключ.")
-        return False
-    return True
+    print(f"[activate] OK user={m.from_user.id} key={key} days={row[1]}")
+    await m.answer("✅ Ключ активирован! Отправь /start для меню.",
+                   reply_markup=main_menu())
 
 # ---------- LOGIN ----------
 @router.message(F.text == "📱 Войти в аккаунт")
@@ -497,6 +506,53 @@ async def set_interval(m: Message, state: FSMContext):
 async def stop_mail(m: Message):
     ok = await stop_mailing(m.from_user.id)
     await m.answer("⛔ Остановлено" if ok else "Нечего останавливать.")
+
+# ---------- HELPERS ----------
+async def ensure_active(m: Message) -> bool:
+    if m.from_user.id == ADMIN_ID:
+        return True
+    u = await get_user(m.from_user.id)
+    if not is_active(u):
+        await m.answer("🔒 Нет активного доступа. Отправь ключ активации.")
+        return False
+    return True
+
+# ---------- FALLBACK: активация ключом для неактивных ----------
+# ВАЖНО: должен идти ПОСЛЕ всех текстовых хендлеров, но ловит только текст.
+@router.message(F.text, ~F.text.startswith("/"))
+async def auto_activate(m: Message, state: FSMContext):
+    # не для админа
+    if m.from_user.id == ADMIN_ID:
+        return
+    # если уже в FSM-состоянии (логин, пароль, тексты рассылки и т.д.) — не мешаем
+    current = await state.get_state()
+    if current is not None:
+        return
+    # если уже активен — не перехватываем
+    u = await get_user(m.from_user.id)
+    if is_active(u):
+        return
+    # не перехватываем кнопки меню
+    if m.text in {
+        "🔑 Активировать ключ", "📱 Войти в аккаунт",
+        "📢 Обычная рассылка", "🛡 Безопасная рассылка",
+        "⛔ Стоп рассылку",
+    }:
+        return
+
+    key = m.text.strip()
+    print(f"[auto_activate] user={m.from_user.id} tries key='{key}'")
+    row = await get_key(key)
+    if not row:
+        await m.answer("❌ Ключ не найден. Проверь и отправь снова.")
+        return
+    if row[2] is not None:
+        await m.answer("❌ Этот ключ уже использован.")
+        return
+    await activate_key(m.from_user.id, key, row[1])
+    print(f"[auto_activate] OK user={m.from_user.id} key={key} days={row[1]}")
+    await m.answer("✅ Ключ активирован! Отправь /start чтобы открыть меню.",
+                   reply_markup=main_menu())
 
 # ============ MAIN ============
 async def main():
