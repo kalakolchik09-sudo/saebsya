@@ -24,6 +24,7 @@ from aiogram.types import (
 )
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError
+from telethon.tl.types import Chat, Channel
 
 # ============ CONFIG ============
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -32,8 +33,6 @@ API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 DATA_DIR = os.environ.get("DATA_DIR", "./data")
 
-# Railway volume mount path (если нет — используем ./data)
-DATA_DIR = os.environ.get("DATA_DIR", "./data")
 os.makedirs(DATA_DIR, exist_ok=True)
 SESSIONS_DIR = os.path.join(DATA_DIR, "sessions")
 os.makedirs(SESSIONS_DIR, exist_ok=True)
@@ -125,25 +124,30 @@ running: dict[int, dict] = {}
 
 async def make_client(user_id: int) -> TelegramClient:
     path = os.path.join(SESSIONS_DIR, f"u{user_id}")
-    client = TelegramClient(path, API_ID, API_HASH)
-    return client
+    return TelegramClient(path, API_ID, API_HASH)
 
-async def collect_peers(client: TelegramClient):
+async def collect_group_peers(client: TelegramClient):
+    """Только группы и супергруппы (без личных чатов и каналов)."""
     peers = []
     async for dialog in client.iter_dialogs():
-        peers.append(dialog.id)
+        ent = dialog.entity
+        if isinstance(ent, Chat):
+            peers.append(dialog.id)
+        elif isinstance(ent, Channel) and getattr(ent, "megagroup", False):
+            peers.append(dialog.id)
     return peers
 
 async def _send_loop(user_id: int, texts: list[str], interval: int,
                      safe: bool, stop_event: asyncio.Event):
     client: TelegramClient = running[user_id]["client"]
     try:
-        peers = await collect_peers(client)
+        peers = await collect_group_peers(client)
     except Exception as e:
         print(f"[peers error] {e}")
         return
+    print(f"[mail] user={user_id} групп найдено: {len(peers)}")
     if not peers:
-        print("[mail] нет получателей")
+        print("[mail] нет групп для рассылки")
         return
     i = 0
     while not stop_event.is_set():
@@ -154,8 +158,8 @@ async def _send_loop(user_id: int, texts: list[str], interval: int,
             try:
                 await client.send_message(peer, text)
             except Exception as e:
-                print(f"[send error] {e}")
-            await asyncio.sleep(random.uniform(3, 7))  # анти-флуд
+                print(f"[send error peer={peer}] {e}")
+            await asyncio.sleep(random.uniform(3, 7))
         i += 1
         delay = interval * random.uniform(0.8, 1.2) if safe else interval
         try:
