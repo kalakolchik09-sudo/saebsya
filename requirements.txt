@@ -1,0 +1,4 @@
+aiogram==3.13.1
+telethon==1.36.0
+aiosqlite
+qrcode[pil]
