@@ -175,6 +175,7 @@ async def all_session_accounts():
         return await cur.fetchall()
 
 running: dict[str, dict] = {}
+status_msg: dict[str, int] = {}
 
 def make_session_path(session_name: str) -> str:
     return os.path.join(SESSIONS_DIR, session_name)
@@ -189,51 +190,130 @@ async def collect_group_peers(client: TelegramClient):
     peers = []
     async for dialog in client.iter_dialogs():
         ent = dialog.entity
+        is_group = False
         if isinstance(ent, Chat):
-            peers.append(dialog.id)
+            is_group = True
         elif isinstance(ent, Channel) and getattr(ent, "megagroup", False):
-            peers.append(dialog.id)
+            is_group = True
+        if not is_group:
+            continue
+        title = getattr(ent, "title", None) or str(dialog.id)
+        peers.append((dialog.id, title))
     return peers
 
-async def _send_loop(session_name: str, texts: list[str], interval: int,
-                     safe: bool, stop_event: asyncio.Event):
+async def _send_loop(session_name: str, texts: list[str], interval_min: int,
+                     safe: bool, stop_event: asyncio.Event, chat_id: int):
     client: TelegramClient = running[session_name]["client"]
     try:
         peers = await collect_group_peers(client)
     except Exception as e:
         print(f"[peers error {session_name}] {e}")
+        try:
+            await bot.send_message(chat_id, f"❌ Ошибка сбора групп: {e}")
+        except Exception:
+            pass
+        running[session_name]["task"] = None
         return
-    print(f"[mail] session={session_name} групп найдено: {len(peers)}")
+
+    total = len(peers)
+    print(f"[mail] session={session_name} групп найдено: {total}")
     if not peers:
-        print(f"[mail {session_name}] нет групп")
+        try:
+            await bot.send_message(chat_id, "❌ Группы не найдены.")
+        except Exception:
+            pass
+        running[session_name]["task"] = None
         return
 
-    if safe:
-        text = texts[0]
-        for peer in peers:
-            if stop_event.is_set():
-                return
-            try:
-                await client.send_message(peer, text)
-            except Exception as e:
-                print(f"[send error {session_name} peer={peer}] {e}")
-            await asyncio.sleep(interval * random.uniform(0.8, 1.2))
-    else:
-        for i, peer in enumerate(peers):
-            if stop_event.is_set():
-                return
-            text = texts[i % len(texts)]
-            try:
-                await client.send_message(peer, text)
-            except Exception as e:
-                print(f"[send error {session_name} peer={peer}] {e}")
-            if i < len(peers) - 1:
-                await asyncio.sleep(interval)
+    interval_sec = interval_min * 60
+    sent = 0
+    last5: list[str] = []
+    cycle = 0
 
-    print(f"[mail {session_name}] цикл завершён")
-    running[session_name]["task"] = None
+    async def push_status():
+        lines = [
+            "📢 Рассылка запущена",
+            f"👥 Групп: {total}",
+            f"✅ Отправлено: {sent}",
+            f"🔄 Цикл: {cycle}",
+        ]
+        if last5:
+            lines.append("")
+            lines.append("Последние 5:")
+            for t in last5[-5:]:
+                lines.append(f"• {t}")
+        text = "\n".join(lines)
+        mid = status_msg.get(session_name)
+        if mid is None:
+            try:
+                m = await bot.send_message(chat_id, text)
+                status_msg[session_name] = m.message_id
+            except Exception as e:
+                print(f"[status send error] {e}")
+        else:
+            try:
+                await bot.edit_message_text(chat_id=chat_id, message_id=mid, text=text)
+            except Exception as e:
+                print(f"[status edit error] {e}")
 
-async def start_mailing_session(session_name: str, texts: list[str], interval: int, safe: bool):
+    try:
+        await push_status()
+    except Exception:
+        pass
+
+    try:
+        while not stop_event.is_set():
+            cycle += 1
+            for i, (peer_id, title) in enumerate(peers):
+                if stop_event.is_set():
+                    break
+                text = texts[i % len(texts)] if not safe else texts[0]
+                try:
+                    await client.send_message(peer_id, text)
+                    sent += 1
+                    last5.append(title)
+                except Exception as e:
+                    print(f"[send error {session_name} peer={peer_id}] {e}")
+                await push_status()
+
+                if i < total - 1 or True:
+                    delay = interval_sec * random.uniform(0.8, 1.2) if safe else interval_sec
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=delay)
+                        break
+                    except asyncio.TimeoutError:
+                        pass
+
+            if stop_event.is_set():
+                break
+
+            await push_status()
+            # пауза между циклами = интервал
+            delay = interval_sec * random.uniform(0.8, 1.2) if safe else interval_sec
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=delay)
+                break
+            except asyncio.TimeoutError:
+                pass
+
+    finally:
+        if stop_event.is_set():
+            await push_status()
+            try:
+                await bot.send_message(chat_id, "⛔ Рассылка остановлена.")
+            except Exception:
+                pass
+        else:
+            await push_status()
+            try:
+                await bot.send_message(chat_id, f"✅ Рассылка завершена. Отправлено: {sent}")
+            except Exception:
+                pass
+        running[session_name]["task"] = None
+        status_msg.pop(session_name, None)
+
+async def start_mailing_session(session_name: str, texts: list[str],
+                                interval_min: int, safe: bool, chat_id: int):
     if session_name not in running:
         return False, f"{session_name}: не авторизован"
     if running[session_name].get("task") and not running[session_name]["task"].done():
@@ -242,16 +322,26 @@ async def start_mailing_session(session_name: str, texts: list[str], interval: i
     if not await client.is_user_authorized():
         return False, f"{session_name}: не авторизован"
     stop_event = asyncio.Event()
-    task = asyncio.create_task(_send_loop(session_name, texts, interval, safe, stop_event))
+    task = asyncio.create_task(
+        _send_loop(session_name, texts, interval_min, safe, stop_event, chat_id)
+    )
     running[session_name]["task"] = task
     running[session_name]["stop"] = stop_event
-    return True, f"{session_name}: запущено"
+    return True, "запущено"
 
 async def stop_mailing_session(session_name: str) -> bool:
-    if session_name in running and running[session_name].get("stop"):
-        running[session_name]["stop"].set()
-        return True
-    return False
+    if session_name not in running:
+        return False
+    stop_event = running[session_name].get("stop")
+    task = running[session_name].get("task")
+    if not stop_event or (task is None or task.done()):
+        return False
+    stop_event.set()
+    try:
+        await asyncio.wait_for(task, timeout=5)
+    except Exception:
+        pass
+    return True
 
 async def restore_sessions():
     for uid, session_name in await all_session_accounts():
@@ -646,17 +736,17 @@ async def collect_texts(m: Message, state: FSMContext):
         await m.answer(f"{len(texts)+1}/{need}:")
         return
     await state.update_data(texts=texts)
-    await m.answer("Интервал между сообщениями в группах (в секундах, минимум 30):")
+    await m.answer("Интервал между сообщениями в группах (в минутах, минимум 1):")
     await state.set_state(MailState.interval)
 
 @router.message(MailState.interval)
 async def set_interval(m: Message, state: FSMContext):
     try:
-        interval = int((m.text or "").strip())
-        assert interval >= 30
+        interval_min = int((m.text or "").strip())
+        assert interval_min >= 1
     except Exception:
-        await m.answer("Введи число ≥ 30:"); return
-    await state.update_data(interval=interval)
+        await m.answer("Введи целое число минут ≥ 1:"); return
+    await state.update_data(interval=interval_min)
 
     data = await state.get_data()
     accs = data["accounts"]
@@ -691,11 +781,16 @@ async def mail_one(c: CallbackQuery, state: FSMContext):
 async def launch_mail(m: Message, state: FSMContext, session_names: list[str]):
     data = await state.get_data()
     texts = data["texts"]; interval = data["interval"]; safe = data["safe"]
-    results = []
+    chat_id = m.chat.id if hasattr(m, "chat") else m.from_user.id
+    started = 0
     for sname in session_names:
-        ok, msg = await start_mailing_session(sname, texts, interval, safe)
-        results.append(("✅" if ok else "❌") + " " + msg)
-    await m.answer("Результат:\n" + "\n".join(results))
+        ok, _ = await start_mailing_session(sname, texts, interval, safe, chat_id)
+        if ok:
+            started += 1
+    if started:
+        await m.answer(f"✅ Рассылка запущена ({started} акк.)")
+    else:
+        await m.answer("❌ Не удалось запустить рассылку.")
     await state.clear()
 
 @router.message(F.text == "⛔ Стоп рассылку")
