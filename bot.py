@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import asyncio
 import io
 import os
@@ -206,9 +207,9 @@ async def _send_loop(session_name: str, texts: list[str], interval: int,
     if not peers:
         print(f"[mail {session_name}] нет групп")
         return
-    i = 0
-    while not stop_event.is_set():
-        text = texts[i % len(texts)]
+
+    if safe:
+        text = texts[0]
         for peer in peers:
             if stop_event.is_set():
                 return
@@ -216,13 +217,21 @@ async def _send_loop(session_name: str, texts: list[str], interval: int,
                 await client.send_message(peer, text)
             except Exception as e:
                 print(f"[send error {session_name} peer={peer}] {e}")
-            await asyncio.sleep(random.uniform(3, 7))
-        i += 1
-        delay = interval * random.uniform(0.8, 1.2) if safe else interval
-        try:
-            await asyncio.wait_for(stop_event.wait(), timeout=delay)
-        except asyncio.TimeoutError:
-            pass
+            await asyncio.sleep(interval * random.uniform(0.8, 1.2))
+    else:
+        for i, peer in enumerate(peers):
+            if stop_event.is_set():
+                return
+            text = texts[i % len(texts)]
+            try:
+                await client.send_message(peer, text)
+            except Exception as e:
+                print(f"[send error {session_name} peer={peer}] {e}")
+            if i < len(peers) - 1:
+                await asyncio.sleep(interval)
+
+    print(f"[mail {session_name}] цикл завершён")
+    running[session_name]["task"] = None
 
 async def start_mailing_session(session_name: str, texts: list[str], interval: int, safe: bool):
     if session_name not in running:
@@ -637,7 +646,7 @@ async def collect_texts(m: Message, state: FSMContext):
         await m.answer(f"{len(texts)+1}/{need}:")
         return
     await state.update_data(texts=texts)
-    await m.answer("Интервал между кругами (в секундах, минимум 30):")
+    await m.answer("Интервал между сообщениями в группах (в секундах, минимум 30):")
     await state.set_state(MailState.interval)
 
 @router.message(MailState.interval)
