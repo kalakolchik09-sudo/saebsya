@@ -34,6 +34,8 @@ DATA_DIR = os.environ.get("DATA_DIR", "./data")
 
 DEFAULT_ACCOUNTS_LIMIT = 2
 MAX_ACCOUNTS = 999
+BETWEEN_CHATS_SEC = 1
+MIN_INTERVAL_MIN = 20
 
 os.makedirs(DATA_DIR, exist_ok=True)
 SESSIONS_DIR = os.path.join(DATA_DIR, "sessions")
@@ -276,10 +278,9 @@ async def _send_loop(session_name: str, texts: list[str], interval_min: int,
                     print(f"[send error {session_name} peer={peer_id}] {e}")
                 await push_status()
 
-                if i < total - 1 or True:
-                    delay = interval_sec * random.uniform(0.8, 1.2) if safe else interval_sec
+                if i < total - 1:
                     try:
-                        await asyncio.wait_for(stop_event.wait(), timeout=delay)
+                        await asyncio.wait_for(stop_event.wait(), timeout=BETWEEN_CHATS_SEC)
                         break
                     except asyncio.TimeoutError:
                         pass
@@ -288,7 +289,6 @@ async def _send_loop(session_name: str, texts: list[str], interval_min: int,
                 break
 
             await push_status()
-            # пауза между циклами = интервал
             delay = interval_sec * random.uniform(0.8, 1.2) if safe else interval_sec
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=delay)
@@ -736,16 +736,16 @@ async def collect_texts(m: Message, state: FSMContext):
         await m.answer(f"{len(texts)+1}/{need}:")
         return
     await state.update_data(texts=texts)
-    await m.answer("Интервал между сообщениями в группах (в минутах, минимум 1):")
+    await m.answer(f"Интервал между циклами (в минутах, минимум {MIN_INTERVAL_MIN}):")
     await state.set_state(MailState.interval)
 
 @router.message(MailState.interval)
 async def set_interval(m: Message, state: FSMContext):
     try:
         interval_min = int((m.text or "").strip())
-        assert interval_min >= 1
+        assert interval_min >= MIN_INTERVAL_MIN
     except Exception:
-        await m.answer("Введи целое число минут ≥ 1:"); return
+        await m.answer(f"Введи целое число минут ≥ {MIN_INTERVAL_MIN}:"); return
     await state.update_data(interval=interval_min)
 
     data = await state.get_data()
